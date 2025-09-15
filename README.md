@@ -19,7 +19,7 @@ Because the models in the architecture are the exact same as in the micromodel, 
 <img src="https://raw.githubusercontent.com/MarinaMaia2021/supportMaterial/main/matPoint_2d_paper1.gif" width="75%" height="75%"/>
 </p>
 
-## **NEW**: Related code
+## Related code
 
 - You can quickly try out our [demo notebook](https://colab.research.google.com/drive/1LmBUjF0ZrEm3ur1Bt8_XUgoLtQHdU4lM?usp=sharing) directly in Google Colab.
 
@@ -31,9 +31,13 @@ Because the models in the architecture are the exact same as in the micromodel, 
 
 - MA Maia, IBCM Rocha, FP van der Meer (2024), [PRNNs for 3D composites, finite-strain thermoviscoplasticity, creep and fatigue](https://www.sciencedirect.com/science/article/pii/S0167663624002370)
 
-- N Kovacs, MA Maia, IBCM Rocha, C Furtado, PP Camanho, FP van der Meer (2024), [PRNNs for micromodels including distributed cohesive damage](https://arxiv.org/abs/2410.13774)
+- N Kovacs, MA Maia, IBCM Rocha, C Furtado, PP Camanho, FP van der Meer (2025), [PRNNs for micromodels including distributed cohesive damage](https://www.sciencedirect.com/science/article/pii/S0997753825001020)
 
 - MA Maia, IBCM Rocha, D Kovacevic, FP van der Meer (2025), [Reproducing creep and fatigue experiments in thermoplastics using PRNNs](https://arxiv.org/abs/2501.10193)
+
+- E Ghane, MA Maia, IBCM Rocha, M Fagerstrom, M Mirkhalaf (2025), [Hierarchical PRNNs for three-scale simulations](https://arxiv.org/abs/2503.04901)
+
+- N Kovacs, IBCM Rocha, FP van der Meer, C Furtado, PP Camanho (2025), [PRNNs for multiscale uncertainty quantificatoin](https://arxiv.org/abs/2504.11625)
 
 ## In this repository
 
