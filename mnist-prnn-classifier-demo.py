@@ -96,7 +96,7 @@ def parse_args():
     )
     parser.add_argument(
         '--decoder-features',
-        choices=('epspeq', 'epsp'),
+        choices=('epspeq', 'epsp', 'both'),
         default='epspeq',
         help='material state features decoded by the PRNN classifier',
     )

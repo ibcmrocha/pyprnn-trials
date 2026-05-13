@@ -113,9 +113,8 @@ class PRNNClassifier(torch.nn.Module):
     independent zero-mean Gaussian processes (one each for ``eps_xx``,
     ``eps_yy`` and ``gam_xy``).  Every call to :meth:`forward` samples a new
     strain path from those GPs, sends it through the same material layer used
-    by :class:`PRNN`, and decodes either the final equivalent plastic
-    strains or the final plastic strain vectors of the material points to
-    class logits or probabilities.
+    by :class:`PRNN`, and decodes the selected final material state
+    features of the material points to class logits or probabilities.
     """
 
     def __init__(self, image_shape, n_matpts, seq_len, **kwargs):
@@ -132,7 +131,7 @@ class PRNNClassifier(torch.nn.Module):
         self.strain_scale = kwargs.get('strain_scale', 1.0)
         hidden_size = kwargs.get('hidden_size', 64)
         self.decoder_features = kwargs.get('decoder_features', 'epspeq')
-        valid_decoder_features = ('epspeq', 'epsp')
+        valid_decoder_features = ('epspeq', 'epsp', 'both')
         if self.decoder_features not in valid_decoder_features:
             raise ValueError(
                 'decoder_features must be one of '
@@ -167,9 +166,12 @@ class PRNNClassifier(torch.nn.Module):
             device=self.device,
             bias=False,
         )
-        decoder_input_size = self.mat_pts
-        if self.decoder_features == 'epsp':
-            decoder_input_size = self.n_latents
+        decoder_input_sizes = {
+            'epspeq': self.mat_pts,
+            'epsp': self.n_latents,
+            'both': self.mat_pts + self.n_latents,
+        }
+        decoder_input_size = decoder_input_sizes[self.decoder_features]
         self.decoder = torch.nn.Linear(
             in_features=decoder_input_size,
             out_features=self.n_outputs,
@@ -242,9 +244,13 @@ class PRNNClassifier(torch.nn.Module):
         return output
 
     def _get_decoder_features(self, material_model, batch_size):
+        epspeq = material_model.getHistory().view(batch_size, self.mat_pts)
+        epsp = material_model.epsp_hist.view(batch_size, self.n_latents)
         if self.decoder_features == 'epspeq':
-            return material_model.getHistory().view(batch_size, self.mat_pts)
-        return material_model.epsp_hist.view(batch_size, self.n_latents)
+            return epspeq
+        if self.decoder_features == 'epsp':
+            return epsp
+        return torch.cat((epspeq, epsp), dim=1)
 
 
 class SoftLayer(torch.nn.Module): 
