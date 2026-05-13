@@ -299,6 +299,15 @@ def plot_prnn_sample_diagnostics(diagnostics, digits, filename):
     n_samples = images.size(0)
     time_steps = np.arange(strain_paths.size(1))
     strain_names = (r'$\epsilon_{xx}$', r'$\epsilon_{yy}$', r'$\gamma_{xy}$')
+    strain_min = strain_paths.amin(dim=(0, 1))
+    strain_max = strain_paths.amax(dim=(0, 1))
+    strain_padding = 0.05 * (strain_max - strain_min)
+    zero_range = strain_padding == 0
+    strain_padding[zero_range] = 1e-12
+    strain_y_limits = torch.stack((
+        strain_min - strain_padding,
+        strain_max + strain_padding,
+    ), dim=1)
 
     fig, axes = plt.subplots(
         n_samples,
@@ -325,6 +334,7 @@ def plot_prnn_sample_diagnostics(diagnostics, digits, filename):
         for component in range(3):
             ax = axes[row, component + 1]
             ax.plot(time_steps, strain_paths[row, :, component].numpy())
+            ax.set_ylim(strain_y_limits[component].tolist())
             ax.set_xlabel(
                 rf'$\ell$={length_scales[row, component].item():.3g}, '
                 rf'$\sigma_f$={sigma_f[row, component].item():.3g}'
