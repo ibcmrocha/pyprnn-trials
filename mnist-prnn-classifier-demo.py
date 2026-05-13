@@ -6,7 +6,7 @@ The script trains two models on the same configurable MNIST digit subset:
 
 * ``PRNNClassifier``: encodes each image to GP length scales, samples a strain
   path on every forward pass, runs the path through the J2 material layer, and
-  decodes equivalent plastic strains to class logits.
+  decodes the selected material state features to class logits.
 * ``MLPClassifier``: a direct fully-connected image classifier used as a simple
   baseline.
 
@@ -93,6 +93,12 @@ def parse_args():
         type=int,
         default=8,
         help='PRNN Monte Carlo samples during evaluation',
+    )
+    parser.add_argument(
+        '--decoder-features',
+        choices=('epspeq', 'epsp'),
+        default='epspeq',
+        help='material state features decoded by the PRNN classifier',
     )
     parser.add_argument('--lr', type=float, default=1e-3, help='Adam learning rate')
     parser.add_argument('--seed', type=int, default=0, help='random seed')
@@ -254,6 +260,7 @@ def main():
         n_matpts=args.mat_pts,
         seq_len=args.seq_len,
         n_classes=n_classes,
+        decoder_features=args.decoder_features,
         device=device,
     ).to(device)
     mlp = MLPClassifier(
@@ -263,6 +270,7 @@ def main():
     ).to(device)
 
     print(f'Training on MNIST digits {args.digits} ({n_classes} classes).')
+    print(f'PRNN decoder features: {args.decoder_features}')
     train_classifier(prnn, train_loader, device, args.epochs, args.lr, 'PRNN')
     train_classifier(mlp, train_loader, device, args.epochs, args.lr, 'MLP')
 

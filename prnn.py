@@ -113,8 +113,9 @@ class PRNNClassifier(torch.nn.Module):
     independent zero-mean Gaussian processes (one each for ``eps_xx``,
     ``eps_yy`` and ``gam_xy``).  Every call to :meth:`forward` samples a new
     strain path from those GPs, sends it through the same material layer used
-    by :class:`PRNN`, and decodes the final plastic strain vectors of the
-    material points to class logits or probabilities.
+    by :class:`PRNN`, and decodes either the final equivalent plastic
+    strains or the final plastic strain vectors of the material points to
+    class logits or probabilities.
     """
 
     def __init__(self, image_shape, n_matpts, seq_len, **kwargs):
@@ -130,6 +131,13 @@ class PRNNClassifier(torch.nn.Module):
         self.length_scale_min = kwargs.get('length_scale_min', 1e-2)
         self.strain_scale = kwargs.get('strain_scale', 1.0)
         hidden_size = kwargs.get('hidden_size', 64)
+        self.decoder_features = kwargs.get('decoder_features', 'epspeq')
+        valid_decoder_features = ('epspeq', 'epsp')
+        if self.decoder_features not in valid_decoder_features:
+            raise ValueError(
+                'decoder_features must be one of '
+                f'{valid_decoder_features}, got {self.decoder_features!r}.'
+            )
 
         if self.n_outputs < 2:
             raise ValueError('PRNNClassifier requires at least two classes.')
@@ -144,13 +152,13 @@ class PRNNClassifier(torch.nn.Module):
         print('Sampled strain path length', self.seq_len)
         print('Material layer size (points)', self.mat_pts)
         print('Material layer size (units)', self.n_latents)
+        print('Decoder features', self.decoder_features)
         print('Output classes', self.n_outputs)
         print('------------------------------------')
 
         self.image_encoder = torch.nn.Sequential(
             torch.nn.Flatten(),
             torch.nn.Linear(image_size, hidden_size, device=self.device),
-            torch.nn.Softplus(),
             torch.nn.Linear(hidden_size, self.n_features, device=self.device),
         )
         self.fc1 = torch.nn.Linear(
@@ -159,8 +167,11 @@ class PRNNClassifier(torch.nn.Module):
             device=self.device,
             bias=False,
         )
+        decoder_input_size = self.mat_pts
+        if self.decoder_features == 'epsp':
+            decoder_input_size = self.n_latents
         self.decoder = torch.nn.Linear(
-            in_features=self.n_latents,
+            in_features=decoder_input_size,
             out_features=self.n_outputs,
             device=self.device,
         )
@@ -220,15 +231,20 @@ class PRNNClassifier(torch.nn.Module):
             material_model.update(local_strain.view(ip_pointsb, self.n_features))
             material_model.commit()
 
-        epsp = material_model.epsp_hist.view(batch_size, self.n_latents)
-        logits = self.decoder(epsp)
+        decoder_features = self._get_decoder_features(material_model, batch_size)
+        logits = self.decoder(decoder_features)
         output = logits
         if not return_logits:
             output = torch.softmax(logits, dim=-1)
 
         if return_paths:
-            return output, strain_paths, length_scales, epsp
+            return output, strain_paths, length_scales, decoder_features
         return output
+
+    def _get_decoder_features(self, material_model, batch_size):
+        if self.decoder_features == 'epspeq':
+            return material_model.getHistory().view(batch_size, self.mat_pts)
+        return material_model.epsp_hist.view(batch_size, self.n_latents)
 
 
 class SoftLayer(torch.nn.Module): 
