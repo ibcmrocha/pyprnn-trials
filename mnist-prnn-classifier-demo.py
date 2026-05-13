@@ -14,6 +14,7 @@ Examples
 --------
 python mnist-prnn-classifier-demo.py --digits 0 1 --train-size 128
 python mnist-prnn-classifier-demo.py --digits 0 1 2 3 --train-size 512
+python mnist-prnn-classifier-demo.py --sigma-f-mode image
 """
 
 import argparse
@@ -99,6 +100,12 @@ def parse_args():
         choices=('epspeq', 'epsp', 'both'),
         default='epspeq',
         help='material state features decoded by the PRNN classifier',
+    )
+    parser.add_argument(
+        '--sigma-f-mode',
+        choices=('constant', 'image'),
+        default='constant',
+        help='use constant trainable or image-dependent GP amplitudes',
     )
     parser.add_argument('--lr', type=float, default=1e-3, help='Adam learning rate')
     parser.add_argument('--seed', type=int, default=0, help='random seed')
@@ -261,6 +268,7 @@ def main():
         seq_len=args.seq_len,
         n_classes=n_classes,
         decoder_features=args.decoder_features,
+        sigma_f_mode=args.sigma_f_mode,
         device=device,
     ).to(device)
     mlp = MLPClassifier(
@@ -271,6 +279,7 @@ def main():
 
     print(f'Training on MNIST digits {args.digits} ({n_classes} classes).')
     print(f'PRNN decoder features: {args.decoder_features}')
+    print(f'PRNN sigma_f mode: {args.sigma_f_mode}')
     train_classifier(prnn, train_loader, device, args.epochs, args.lr, 'PRNN')
     train_classifier(mlp, train_loader, device, args.epochs, args.lr, 'MLP')
 

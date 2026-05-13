@@ -111,8 +111,10 @@ class PRNNClassifier(torch.nn.Module):
 
     The classifier uses a simple image encoder to parameterize three
     independent zero-mean Gaussian processes (one each for ``eps_xx``,
-    ``eps_yy`` and ``gam_xy``).  Every call to :meth:`forward` samples a new
-    strain path from those GPs, sends it through the same material layer used
+    ``eps_yy`` and ``gam_xy``).  The GP amplitudes can either be constant
+    trainable parameters or image-dependent encoder outputs.  Every call to
+    :meth:`forward` samples a new strain path from those GPs, sends it
+    through the same material layer used
     by :class:`PRNN`, and decodes the selected final material state
     features of the material points to class logits or probabilities.
     """
@@ -130,6 +132,13 @@ class PRNNClassifier(torch.nn.Module):
         self.length_scale_min = kwargs.get('length_scale_min', 1e-2)
         self.strain_scale = kwargs.get('strain_scale', 1.0)
         hidden_size = kwargs.get('hidden_size', 64)
+        self.sigma_f_mode = kwargs.get('sigma_f_mode', 'constant')
+        valid_sigma_f_modes = ('constant', 'image')
+        if self.sigma_f_mode not in valid_sigma_f_modes:
+            raise ValueError(
+                'sigma_f_mode must be one of '
+                f'{valid_sigma_f_modes}, got {self.sigma_f_mode!r}.'
+            )
         self.decoder_features = kwargs.get('decoder_features', 'epspeq')
         valid_decoder_features = ('epspeq', 'epsp', 'both')
         if self.decoder_features not in valid_decoder_features:
@@ -152,13 +161,17 @@ class PRNNClassifier(torch.nn.Module):
         print('Material layer size (points)', self.mat_pts)
         print('Material layer size (units)', self.n_latents)
         print('Decoder features', self.decoder_features)
+        print('GP sigma_f mode', self.sigma_f_mode)
         print('Output classes', self.n_outputs)
         print('------------------------------------')
 
+        encoder_outputs = self.n_features
+        if self.sigma_f_mode == 'image':
+            encoder_outputs = 2 * self.n_features
         self.image_encoder = torch.nn.Sequential(
             torch.nn.Flatten(),
             torch.nn.Linear(image_size, hidden_size, device=self.device),
-            torch.nn.Linear(hidden_size, self.n_features, device=self.device),
+            torch.nn.Linear(hidden_size, encoder_outputs, device=self.device),
         )
         self.fc1 = torch.nn.Linear(
             in_features=self.n_features,
@@ -182,27 +195,56 @@ class PRNNClassifier(torch.nn.Module):
             kwargs.get('sigma_f_init', 2.0e-2),
             device=self.device,
         )
-        self.raw_sigma_f = torch.nn.Parameter(_inverse_softplus(sigma_f_init))
+        if self.sigma_f_mode == 'constant':
+            self.raw_sigma_f = torch.nn.Parameter(_inverse_softplus(sigma_f_init))
+        else:
+            self.register_parameter('raw_sigma_f', None)
         time_grid = torch.linspace(0.0, 1.0, self.seq_len, device=self.device)
         self.register_buffer('time_grid', time_grid)
 
     @property
     def sigma_f(self):
+        if self.raw_sigma_f is None:
+            return None
         return torch.nn.functional.softplus(self.raw_sigma_f)
 
     def encode_length_scales(self, images):
-        images = images.to(device=self.device, dtype=self.time_grid.dtype)
-        raw_length_scales = self.image_encoder(images)
-        return torch.nn.functional.softplus(raw_length_scales) + self.length_scale_min
+        length_scales, _ = self.encode_gp_parameters(images)
+        return length_scales
 
-    def sample_strain_paths(self, length_scales):
+    def encode_gp_parameters(self, images):
+        images = images.to(device=self.device, dtype=self.time_grid.dtype)
+        raw_gp_parameters = self.image_encoder(images)
+        if self.sigma_f_mode == 'constant':
+            raw_length_scales = raw_gp_parameters
+            sigma_f = self.sigma_f
+        else:
+            raw_length_scales, raw_sigma_f = raw_gp_parameters.chunk(2, dim=-1)
+            sigma_f = torch.nn.functional.softplus(raw_sigma_f)
+        length_scales = (
+            torch.nn.functional.softplus(raw_length_scales)
+            + self.length_scale_min
+        )
+        return length_scales, sigma_f
+
+    def sample_strain_paths(self, length_scales, sigma_f=None):
         batch_size = length_scales.size(0)
         dtype = length_scales.dtype
         time_grid = self.time_grid.to(dtype=dtype)
         dt2 = (time_grid[:, None] - time_grid[None, :]).pow(2)
-        sigma_f = self.sigma_f.to(dtype=dtype)
+        if sigma_f is None:
+            sigma_f = self.sigma_f
+        if sigma_f is None:
+            raise ValueError(
+                'sigma_f must be provided when sigma_f_mode is image.'
+            )
+        sigma_f = sigma_f.to(device=self.device, dtype=dtype)
+        if sigma_f.dim() == 1:
+            sigma_f = sigma_f.view(1, self.n_features, 1, 1)
+        else:
+            sigma_f = sigma_f.view(batch_size, self.n_features, 1, 1)
 
-        cov = sigma_f.view(1, self.n_features, 1, 1).pow(2) * torch.exp(
+        cov = sigma_f.pow(2) * torch.exp(
             -0.5 * dt2.view(1, 1, self.seq_len, self.seq_len)
             / length_scales.view(batch_size, self.n_features, 1, 1).pow(2)
         )
@@ -220,8 +262,8 @@ class PRNNClassifier(torch.nn.Module):
         return self.strain_scale * paths.transpose(1, 2).contiguous()
 
     def forward(self, images, return_paths=False, return_logits=False):
-        length_scales = self.encode_length_scales(images)
-        strain_paths = self.sample_strain_paths(length_scales)
+        length_scales, sigma_f = self.encode_gp_parameters(images)
+        strain_paths = self.sample_strain_paths(length_scales, sigma_f)
         batch_size = strain_paths.size(0)
 
         material_model = J2Material(self.device)
