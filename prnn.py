@@ -113,7 +113,7 @@ class PRNNClassifier(torch.nn.Module):
     independent zero-mean Gaussian processes (one each for ``eps_xx``,
     ``eps_yy`` and ``gam_xy``).  Every call to :meth:`forward` samples a new
     strain path from those GPs, sends it through the same material layer used
-    by :class:`PRNN`, and decodes the final equivalent plastic strains of the
+    by :class:`PRNN`, and decodes the final plastic strain vectors of the
     material points to class logits or probabilities.
     """
 
@@ -160,7 +160,7 @@ class PRNNClassifier(torch.nn.Module):
             bias=False,
         )
         self.decoder = torch.nn.Linear(
-            in_features=self.mat_pts,
+            in_features=self.n_latents,
             out_features=self.n_outputs,
             device=self.device,
         )
@@ -220,14 +220,14 @@ class PRNNClassifier(torch.nn.Module):
             material_model.update(local_strain.view(ip_pointsb, self.n_features))
             material_model.commit()
 
-        epspeq = material_model.getHistory().view(batch_size, self.mat_pts)
-        logits = self.decoder(epspeq)
+        epsp = material_model.epsp_hist.view(batch_size, self.n_latents)
+        logits = self.decoder(epsp)
         output = logits
         if not return_logits:
             output = torch.softmax(logits, dim=-1)
 
         if return_paths:
-            return output, strain_paths, length_scales, epspeq
+            return output, strain_paths, length_scales, epsp
         return output
 
 
