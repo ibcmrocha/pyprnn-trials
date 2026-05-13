@@ -15,6 +15,10 @@ Examples
 python mnist-prnn-classifier-demo.py --digits 0 1 --train-size 128
 python mnist-prnn-classifier-demo.py --digits 0 1 2 3 --train-size 512
 python mnist-prnn-classifier-demo.py --sigma-f-mode image
+
+In addition to confusion matrices, the script saves a row-per-test-sample
+diagnostic plot showing each image, its sampled PRNN strain paths, and the
+corresponding PRNN prediction/target labels.
 """
 
 import argparse
@@ -114,6 +118,11 @@ def parse_args():
         '--figure',
         default='mnist-prnn-confusion.png',
         help='confusion-matrix output path',
+    )
+    parser.add_argument(
+        '--sample-figure',
+        default='mnist-prnn-test-samples.png',
+        help='row-per-test-sample PRNN diagnostic figure output path',
     )
     return parser.parse_args()
 
@@ -242,6 +251,112 @@ def plot_confusion_matrices(matrices, titles, digits, filename):
     print(f'Saved confusion matrices to {filename}')
 
 
+def collect_prnn_sample_diagnostics(model, loader, device):
+    model.eval()
+    images_all = []
+    labels_all = []
+    probabilities_all = []
+    strain_paths_all = []
+    length_scales_all = []
+    sigma_f_all = []
+
+    with torch.no_grad():
+        for images, labels in loader:
+            images = images.to(device)
+            labels = labels.to(device)
+            _, sigma_f = model.encode_gp_parameters(images)
+            probabilities, strain_paths, length_scales, _ = model(
+                images,
+                return_paths=True,
+            )
+            if sigma_f.dim() == 1:
+                sigma_f = sigma_f.unsqueeze(0).expand(images.size(0), -1)
+
+            images_all.append(images.cpu())
+            labels_all.append(labels.cpu())
+            probabilities_all.append(probabilities.cpu())
+            strain_paths_all.append(strain_paths.cpu())
+            length_scales_all.append(length_scales.cpu())
+            sigma_f_all.append(sigma_f.cpu())
+
+    return {
+        'images': torch.cat(images_all),
+        'labels': torch.cat(labels_all),
+        'probabilities': torch.cat(probabilities_all),
+        'strain_paths': torch.cat(strain_paths_all),
+        'length_scales': torch.cat(length_scales_all),
+        'sigma_f': torch.cat(sigma_f_all),
+    }
+
+
+def plot_prnn_sample_diagnostics(diagnostics, digits, filename):
+    images = diagnostics['images']
+    labels = diagnostics['labels']
+    probabilities = diagnostics['probabilities']
+    strain_paths = diagnostics['strain_paths']
+    length_scales = diagnostics['length_scales']
+    sigma_f = diagnostics['sigma_f']
+    n_samples = images.size(0)
+    time_steps = np.arange(strain_paths.size(1))
+    strain_names = (r'$\epsilon_{xx}$', r'$\epsilon_{yy}$', r'$\gamma_{xy}$')
+
+    fig, axes = plt.subplots(
+        n_samples,
+        5,
+        figsize=(16, max(2.2 * n_samples, 3.0)),
+        squeeze=False,
+    )
+    for row in range(n_samples):
+        image = images[row].squeeze().numpy()
+        target_index = int(labels[row].item())
+        predicted_index = int(probabilities[row].argmax().item())
+        confidence = float(probabilities[row, predicted_index].item())
+        target_digit = digits[target_index]
+        predicted_digit = digits[predicted_index]
+        is_correct = predicted_index == target_index
+
+        axes[row, 0].imshow(image, cmap='gray')
+        axes[row, 0].set_ylabel(f'Sample {row + 1}')
+        axes[row, 0].set_xticks([])
+        axes[row, 0].set_yticks([])
+        if row == 0:
+            axes[row, 0].set_title('Input image')
+
+        for component in range(3):
+            ax = axes[row, component + 1]
+            ax.plot(time_steps, strain_paths[row, :, component].numpy())
+            ax.set_xlabel(
+                rf'$\ell$={length_scales[row, component].item():.3g}, '
+                rf'$\sigma_f$={sigma_f[row, component].item():.3g}'
+            )
+            if row == 0:
+                ax.set_title(strain_names[component])
+            if component == 0:
+                ax.set_ylabel('strain')
+
+        axes[row, 4].axis('off')
+        label_color = 'tab:green' if is_correct else 'tab:red'
+        axes[row, 4].text(
+            0.5,
+            0.5,
+            f'pred: {predicted_digit}\n'
+            f'target: {target_digit}\n'
+            f'conf: {confidence:.2f}',
+            ha='center',
+            va='center',
+            color=label_color,
+            fontsize=11,
+            transform=axes[row, 4].transAxes,
+        )
+        if row == 0:
+            axes[row, 4].set_title('PRNN labels')
+
+    fig.tight_layout()
+    fig.savefig(filename, dpi=150)
+    plt.close(fig)
+    print(f'Saved PRNN sample diagnostics to {filename}')
+
+
 def main():
     args = parse_args()
     args.digits = validate_digits(args.digits)
@@ -301,6 +416,8 @@ def main():
         args.digits,
         args.figure,
     )
+    diagnostics = collect_prnn_sample_diagnostics(prnn, test_loader, device)
+    plot_prnn_sample_diagnostics(diagnostics, args.digits, args.sample_figure)
 
 
 if __name__ == '__main__':
