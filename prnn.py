@@ -107,14 +107,14 @@ class PRNN(torch.nn.Module):
 
 
 class PRNNClassifier(torch.nn.Module):
-    """Stochastic PRNN classifier for small binary image tasks.
+    """Stochastic PRNN classifier for small image classification tasks.
 
     The classifier uses a simple image encoder to parameterize three
     independent zero-mean Gaussian processes (one each for ``eps_xx``,
     ``eps_yy`` and ``gam_xy``).  Every call to :meth:`forward` samples a new
     strain path from those GPs, sends it through the same material layer used
     by :class:`PRNN`, and decodes the final equivalent plastic strains of the
-    material points to a sigmoid-activated binary class probability.
+    material points to class logits or probabilities.
     """
 
     def __init__(self, image_shape, n_matpts, seq_len, **kwargs):
@@ -122,7 +122,7 @@ class PRNNClassifier(torch.nn.Module):
 
         self.device = kwargs.get('device', torch.device('cpu'))
         self.n_features = 3
-        self.n_outputs = 1
+        self.n_outputs = kwargs.get('n_classes', kwargs.get('n_outputs', 2))
         self.mat_pts = n_matpts
         self.n_latents = self.mat_pts * self.n_features
         self.seq_len = seq_len
@@ -130,6 +130,9 @@ class PRNNClassifier(torch.nn.Module):
         self.length_scale_min = kwargs.get('length_scale_min', 1e-2)
         self.strain_scale = kwargs.get('strain_scale', 1.0)
         hidden_size = kwargs.get('hidden_size', 64)
+
+        if self.n_outputs < 2:
+            raise ValueError('PRNNClassifier requires at least two classes.')
 
         if isinstance(image_shape, int):
             image_shape = (image_shape,)
@@ -141,7 +144,7 @@ class PRNNClassifier(torch.nn.Module):
         print('Sampled strain path length', self.seq_len)
         print('Material layer size (points)', self.mat_pts)
         print('Material layer size (units)', self.n_latents)
-        print('Output size', self.n_outputs)
+        print('Output classes', self.n_outputs)
         print('------------------------------------')
 
         self.image_encoder = torch.nn.Sequential(
@@ -203,7 +206,7 @@ class PRNNClassifier(torch.nn.Module):
         paths = torch.matmul(chol, noise.unsqueeze(-1)).squeeze(-1)
         return self.strain_scale * paths.transpose(1, 2).contiguous()
 
-    def forward(self, images, return_paths=False):
+    def forward(self, images, return_paths=False, return_logits=False):
         length_scales = self.encode_length_scales(images)
         strain_paths = self.sample_strain_paths(length_scales)
         batch_size = strain_paths.size(0)
@@ -219,11 +222,13 @@ class PRNNClassifier(torch.nn.Module):
 
         epspeq = material_model.getHistory().view(batch_size, self.mat_pts)
         logits = self.decoder(epspeq)
-        probabilities = torch.sigmoid(logits)
+        output = logits
+        if not return_logits:
+            output = torch.softmax(logits, dim=-1)
 
         if return_paths:
-            return probabilities, strain_paths, length_scales, epspeq
-        return probabilities
+            return output, strain_paths, length_scales, epspeq
+        return output
 
 
 class SoftLayer(torch.nn.Module): 

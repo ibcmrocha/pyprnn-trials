@@ -1,18 +1,19 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Binary MNIST trial for a stochastic PRNN classifier.
+"""MNIST trial for a stochastic multi-class PRNN classifier.
 
-The script trains two models on the same small 0-vs-1 MNIST subset:
+The script trains two models on the same configurable MNIST digit subset:
 
 * ``PRNNClassifier``: encodes each image to GP length scales, samples a strain
   path on every forward pass, runs the path through the J2 material layer, and
-  decodes equivalent plastic strains to a binary class probability.
+  decodes equivalent plastic strains to class logits.
 * ``MLPClassifier``: a direct fully-connected image classifier used as a simple
   baseline.
 
-Example
--------
-python mnist-prnn-classifier-demo.py --train-size 128 --test-size 64 --epochs 5
+Examples
+--------
+python mnist-prnn-classifier-demo.py --digits 0 1 --train-size 128
+python mnist-prnn-classifier-demo.py --digits 0 1 2 3 --train-size 512
 """
 
 import argparse
@@ -33,6 +34,7 @@ class MLPClassifier(torch.nn.Module):
     def __init__(
         self,
         image_shape,
+        n_classes,
         hidden_sizes=(64, 32),
         device=torch.device('cpu'),
     ):
@@ -48,13 +50,10 @@ class MLPClassifier(torch.nn.Module):
                 torch.nn.ReLU(),
             ])
             in_features = hidden_size
-        layers.extend([
-            torch.nn.Linear(in_features, 1, device=device),
-            torch.nn.Sigmoid(),
-        ])
+        layers.append(torch.nn.Linear(in_features, n_classes, device=device))
         self.net = torch.nn.Sequential(*layers)
 
-    def forward(self, images):
+    def forward(self, images, return_logits=True):
         return self.net(images)
 
 
@@ -62,18 +61,23 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         '--digits',
-        nargs=2,
+        nargs='+',
         type=int,
         default=(0, 1),
-        help='two MNIST digits to classify',
+        help='MNIST digits to classify; pass any number from 2 to 10',
     )
     parser.add_argument(
         '--train-size',
         type=int,
         default=128,
-        help='number of training samples',
+        help='number of training samples across all selected digits',
     )
-    parser.add_argument('--test-size', type=int, default=64, help='number of test samples')
+    parser.add_argument(
+        '--test-size',
+        type=int,
+        default=64,
+        help='number of test samples across all selected digits',
+    )
     parser.add_argument('--batch-size', type=int, default=16, help='mini-batch size')
     parser.add_argument('--epochs', type=int, default=5, help='training epochs for each model')
     parser.add_argument('--image-size', type=int, default=14, help='downsampled square image size')
@@ -107,7 +111,17 @@ def set_seed(seed):
     torch.manual_seed(seed)
 
 
-def load_binary_mnist(data_dir, digits, train_size, test_size, image_size, dtype):
+def validate_digits(digits):
+    digits = tuple(dict.fromkeys(digits))
+    if len(digits) < 2:
+        raise ValueError('Select at least two distinct digits with --digits.')
+    invalid_digits = [digit for digit in digits if digit < 0 or digit > 9]
+    if invalid_digits:
+        raise ValueError(f'MNIST digits must be between 0 and 9: {invalid_digits}')
+    return digits
+
+
+def load_mnist_subset(data_dir, digits, train_size, test_size, image_size, dtype):
     transform = transforms.Compose([
         transforms.Resize((image_size, image_size)),
         transforms.ToTensor(),
@@ -122,19 +136,23 @@ def load_binary_mnist(data_dir, digits, train_size, test_size, image_size, dtype
 def _select_digits(dataset, digits, size, dtype):
     images = []
     labels = []
-    digit_to_label = {digits[0]: 0.0, digits[1]: 1.0}
+    digit_to_label = {digit: index for index, digit in enumerate(digits)}
     for image, target in dataset:
         target = int(target)
         if target in digit_to_label:
             images.append(image.to(dtype=dtype))
-            labels.append([digit_to_label[target]])
+            labels.append(digit_to_label[target])
         if len(images) == size:
             break
-    return torch.stack(images), torch.tensor(labels, dtype=dtype)
+    if len(images) < size:
+        raise ValueError(
+            f'Requested {size} samples for digits {digits}, but found {len(images)}.'
+        )
+    return torch.stack(images), torch.tensor(labels, dtype=torch.long)
 
 
 def train_classifier(model, loader, device, epochs, lr, name):
-    criterion = torch.nn.BCELoss()
+    criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     model.train()
     for epoch in range(epochs):
@@ -142,8 +160,8 @@ def train_classifier(model, loader, device, epochs, lr, name):
         for images, labels in loader:
             images = images.to(device)
             labels = labels.to(device)
-            predictions = model(images)
-            loss = criterion(predictions, labels)
+            logits = model(images, return_logits=True)
+            loss = criterion(logits, labels)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -160,38 +178,44 @@ def predict_probabilities(model, loader, device, mc_samples=1):
             images = images.to(device)
             labels = labels.to(device)
             if mc_samples == 1:
-                batch_probabilities = model(images)
+                batch_probabilities = _model_probabilities(model, images)
             else:
-                draws = [model(images) for _ in range(mc_samples)]
+                draws = [_model_probabilities(model, images) for _ in range(mc_samples)]
                 batch_probabilities = torch.stack(draws).mean(dim=0)
             probabilities.append(batch_probabilities.cpu())
             targets.append(labels.cpu())
     return torch.cat(probabilities), torch.cat(targets)
 
 
-def confusion_matrix(probabilities, targets):
-    predictions = (probabilities >= 0.5).to(torch.int64).view(-1)
+def _model_probabilities(model, images):
+    logits = model(images, return_logits=True)
+    return torch.softmax(logits, dim=-1)
+
+
+def confusion_matrix(probabilities, targets, n_classes):
+    predictions = probabilities.argmax(dim=-1).to(torch.int64).view(-1)
     targets = targets.to(torch.int64).view(-1)
-    matrix = torch.zeros((2, 2), dtype=torch.int64)
+    matrix = torch.zeros((n_classes, n_classes), dtype=torch.int64)
     for target, prediction in zip(targets, predictions):
         matrix[target, prediction] += 1
     return matrix
 
 
 def plot_confusion_matrices(matrices, titles, digits, filename):
-    fig, axes = plt.subplots(1, len(matrices), figsize=(5 * len(matrices), 4))
+    fig, axes = plt.subplots(1, len(matrices), figsize=(5 * len(matrices), 4.5))
     if len(matrices) == 1:
         axes = [axes]
+    tick_labels = [str(digit) for digit in digits]
     for ax, matrix, title in zip(axes, matrices, titles):
         matrix_np = matrix.numpy()
         image = ax.imshow(matrix_np, cmap='Blues')
         ax.set_title(title)
         ax.set_xlabel('Predicted')
         ax.set_ylabel('True')
-        ax.set_xticks([0, 1], labels=[str(digits[0]), str(digits[1])])
-        ax.set_yticks([0, 1], labels=[str(digits[0]), str(digits[1])])
-        for row in range(2):
-            for col in range(2):
+        ax.set_xticks(range(len(digits)), labels=tick_labels)
+        ax.set_yticks(range(len(digits)), labels=tick_labels)
+        for row in range(len(digits)):
+            for col in range(len(digits)):
                 ax.text(
                     col,
                     row,
@@ -207,13 +231,15 @@ def plot_confusion_matrices(matrices, titles, digits, filename):
 
 def main():
     args = parse_args()
+    args.digits = validate_digits(args.digits)
     set_seed(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     dtype = torch.get_default_dtype()
+    n_classes = len(args.digits)
 
-    train_dataset, test_dataset = load_binary_mnist(
+    train_dataset, test_dataset = load_mnist_subset(
         args.data_dir,
-        tuple(args.digits),
+        args.digits,
         args.train_size,
         args.test_size,
         args.image_size,
@@ -227,10 +253,16 @@ def main():
         image_shape=image_shape,
         n_matpts=args.mat_pts,
         seq_len=args.seq_len,
+        n_classes=n_classes,
         device=device,
     ).to(device)
-    mlp = MLPClassifier(image_shape=image_shape, device=device).to(device)
+    mlp = MLPClassifier(
+        image_shape=image_shape,
+        n_classes=n_classes,
+        device=device,
+    ).to(device)
 
+    print(f'Training on MNIST digits {args.digits} ({n_classes} classes).')
     train_classifier(prnn, train_loader, device, args.epochs, args.lr, 'PRNN')
     train_classifier(mlp, train_loader, device, args.epochs, args.lr, 'MLP')
 
@@ -241,15 +273,15 @@ def main():
         args.mc_samples,
     )
     mlp_probabilities, _ = predict_probabilities(mlp, test_loader, device, 1)
-    prnn_matrix = confusion_matrix(prnn_probabilities, targets)
-    mlp_matrix = confusion_matrix(mlp_probabilities, targets)
+    prnn_matrix = confusion_matrix(prnn_probabilities, targets, n_classes)
+    mlp_matrix = confusion_matrix(mlp_probabilities, targets, n_classes)
 
     print('PRNN confusion matrix:\n', prnn_matrix.numpy())
     print('MLP confusion matrix:\n', mlp_matrix.numpy())
     plot_confusion_matrices(
         [prnn_matrix, mlp_matrix],
         [f'PRNN ({args.mc_samples} MC samples)', 'MLP baseline'],
-        tuple(args.digits),
+        args.digits,
         args.figure,
     )
 
