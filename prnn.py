@@ -109,14 +109,15 @@ class PRNN(torch.nn.Module):
 class PRNNClassifier(torch.nn.Module):
     """Stochastic PRNN classifier for small image classification tasks.
 
-    The classifier uses a simple image encoder to parameterize three
-    independent zero-mean Gaussian processes (one each for ``eps_xx``,
-    ``eps_yy`` and ``gam_xy``).  The GP amplitudes can either be constant
-    trainable parameters or image-dependent encoder outputs.  Every call to
-    :meth:`forward` samples a new strain path from those GPs, sends it
-    through the same material layer used
-    by :class:`PRNN`, and decodes the selected final material state
-    features of the material points to class logits or probabilities.
+    The classifier can encode images as stochastic Gaussian-process strain
+    paths or as deterministic rasterized image time signals.  In GP mode, a
+    simple image encoder parameterizes three independent zero-mean Gaussian
+    processes (one each for ``eps_xx``, ``eps_yy`` and ``gam_xy``), and the
+    GP amplitudes can either be constant trainable parameters or
+    image-dependent encoder outputs.  Every call to :meth:`forward` sends a
+    strain path through the same material layer used by :class:`PRNN`, and
+    decodes the selected final material state features of the material
+    points to class logits or probabilities.
     """
 
     def __init__(self, image_shape, n_matpts, seq_len, **kwargs):
@@ -132,6 +133,14 @@ class PRNNClassifier(torch.nn.Module):
         self.length_scale_min = kwargs.get('length_scale_min', 1e-2)
         self.strain_scale = kwargs.get('strain_scale', 1.0)
         hidden_size = kwargs.get('hidden_size', 64)
+        self.image_parametrization = kwargs.get('image_parametrization', 'gp')
+        valid_image_parametrizations = ('gp', 'timesignal')
+        if self.image_parametrization not in valid_image_parametrizations:
+            raise ValueError(
+                'image_parametrization must be one of '
+                f'{valid_image_parametrizations}, '
+                f'got {self.image_parametrization!r}.'
+            )
         self.sigma_f_mode = kwargs.get('sigma_f_mode', 'constant')
         valid_sigma_f_modes = ('constant', 'image')
         if self.sigma_f_mode not in valid_sigma_f_modes:
@@ -154,10 +163,16 @@ class PRNNClassifier(torch.nn.Module):
             image_shape = (image_shape,)
         self.image_shape = tuple(image_shape)
         image_size = math.prod(self.image_shape)
+        self.timesignal_seq_len = image_size
+        if len(self.image_shape) >= 2:
+            self.timesignal_seq_len = self.image_shape[-2] * self.image_shape[-1]
+        if self.image_parametrization == 'timesignal':
+            self.seq_len = self.timesignal_seq_len
 
         print('--- PRNNClassifier model summary ---')
         print('Input (image) size', self.image_shape)
-        print('Sampled strain path length', self.seq_len)
+        print('Image parametrization', self.image_parametrization)
+        print('Strain path length', self.seq_len)
         print('Material layer size (points)', self.mat_pts)
         print('Material layer size (units)', self.n_latents)
         print('Decoder features', self.decoder_features)
@@ -165,14 +180,17 @@ class PRNNClassifier(torch.nn.Module):
         print('Output classes', self.n_outputs)
         print('------------------------------------')
 
-        encoder_outputs = self.n_features
-        if self.sigma_f_mode == 'image':
-            encoder_outputs = 2 * self.n_features
-        self.image_encoder = torch.nn.Sequential(
-            torch.nn.Flatten(),
-            torch.nn.Linear(image_size, hidden_size, device=self.device),
-            torch.nn.Linear(hidden_size, encoder_outputs, device=self.device),
-        )
+        if self.image_parametrization == 'gp':
+            encoder_outputs = self.n_features
+            if self.sigma_f_mode == 'image':
+                encoder_outputs = 2 * self.n_features
+            self.image_encoder = torch.nn.Sequential(
+                torch.nn.Flatten(),
+                torch.nn.Linear(image_size, hidden_size, device=self.device),
+                torch.nn.Linear(hidden_size, encoder_outputs, device=self.device),
+            )
+        else:
+            self.image_encoder = None
         self.fc1 = torch.nn.Linear(
             in_features=self.n_features,
             out_features=self.n_latents,
@@ -195,7 +213,10 @@ class PRNNClassifier(torch.nn.Module):
             kwargs.get('sigma_f_init', 2.0e-2),
             device=self.device,
         )
-        if self.sigma_f_mode == 'constant':
+        if (
+            self.image_parametrization == 'gp'
+            and self.sigma_f_mode == 'constant'
+        ):
             self.raw_sigma_f = torch.nn.Parameter(_inverse_softplus(sigma_f_init))
         else:
             self.register_parameter('raw_sigma_f', None)
@@ -213,6 +234,11 @@ class PRNNClassifier(torch.nn.Module):
         return length_scales
 
     def encode_gp_parameters(self, images):
+        if self.image_parametrization != 'gp':
+            raise ValueError(
+                'GP parameters are unavailable when image_parametrization '
+                f'is {self.image_parametrization!r}.'
+            )
         images = images.to(device=self.device, dtype=self.time_grid.dtype)
         raw_gp_parameters = self.image_encoder(images)
         if self.sigma_f_mode == 'constant':
@@ -226,6 +252,57 @@ class PRNNClassifier(torch.nn.Module):
             + self.length_scale_min
         )
         return length_scales, sigma_f
+
+    def encode_strain_paths(self, images):
+        if self.image_parametrization == 'timesignal':
+            return self.encode_timesignal_paths(images), None, None
+
+        length_scales, sigma_f = self.encode_gp_parameters(images)
+        strain_paths = self.sample_strain_paths(length_scales, sigma_f)
+        return strain_paths, length_scales, sigma_f
+
+    def encode_timesignal_paths(self, images):
+        images = images.to(device=self.device, dtype=self.time_grid.dtype)
+        if images.dim() == 4:
+            if images.size(1) != 1:
+                raise ValueError(
+                    'timesignal parametrization expects grayscale images.'
+                )
+            image_matrix = images[:, 0, :, :]
+        elif images.dim() == 3:
+            image_matrix = images
+        else:
+            raise ValueError(
+                'timesignal parametrization expects images shaped as '
+                '[batch, channels, height, width] or [batch, height, width].'
+            )
+
+        row_signal = image_matrix.reshape(image_matrix.size(0), -1)
+        column_signal = image_matrix.transpose(1, 2).reshape(
+            image_matrix.size(0),
+            -1,
+        )
+        diagonal_signal = self._diagonal_vectorize(image_matrix)
+        strain_paths = 0.1 * torch.stack((
+            row_signal,
+            column_signal,
+            diagonal_signal,
+        ), dim=-1)
+        return strain_paths.contiguous()
+
+    def _diagonal_vectorize(self, image_matrix):
+        height = image_matrix.size(1)
+        width = image_matrix.size(2)
+        diagonals = []
+        for offset in range(width):
+            diagonals.append(
+                image_matrix.diagonal(offset=offset, dim1=1, dim2=2)
+            )
+        for offset in range(-1, -height, -1):
+            diagonals.append(
+                image_matrix.diagonal(offset=offset, dim1=1, dim2=2)
+            )
+        return torch.cat(diagonals, dim=1)
 
     def sample_strain_paths(self, length_scales, sigma_f=None):
         batch_size = length_scales.size(0)
@@ -262,8 +339,7 @@ class PRNNClassifier(torch.nn.Module):
         return self.strain_scale * paths.transpose(1, 2).contiguous()
 
     def forward(self, images, return_paths=False, return_logits=False):
-        length_scales, sigma_f = self.encode_gp_parameters(images)
-        strain_paths = self.sample_strain_paths(length_scales, sigma_f)
+        strain_paths, length_scales, _ = self.encode_strain_paths(images)
         batch_size = strain_paths.size(0)
 
         material_model = J2Material(self.device)

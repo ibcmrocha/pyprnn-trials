@@ -15,6 +15,7 @@ Examples
 python mnist-prnn-classifier-demo.py --digits 0 1 --train-size 128
 python mnist-prnn-classifier-demo.py --digits 0 1 2 3 --train-size 512
 python mnist-prnn-classifier-demo.py --sigma-f-mode image
+python mnist-prnn-classifier-demo.py --image-parametrization timesignal
 
 In addition to confusion matrices, the script saves a row-per-test-sample
 diagnostic plot showing each image, its sampled PRNN strain paths, and the
@@ -87,6 +88,12 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=5, help='training epochs for each model')
     parser.add_argument('--image-size', type=int, default=14, help='downsampled square image size')
     parser.add_argument('--seq-len', type=int, default=24, help='sampled GP strain path length')
+    parser.add_argument(
+        '--image-parametrization',
+        choices=('gp', 'timesignal'),
+        default='gp',
+        help='map images to GP-sampled or direct rasterized strain paths',
+    )
     parser.add_argument(
         '--mat-pts',
         type=int,
@@ -264,12 +271,23 @@ def collect_prnn_sample_diagnostics(model, loader, device):
         for images, labels in loader:
             images = images.to(device)
             labels = labels.to(device)
-            _, sigma_f = model.encode_gp_parameters(images)
+            sigma_f = None
+            if model.image_parametrization == 'gp':
+                _, sigma_f = model.encode_gp_parameters(images)
             probabilities, strain_paths, length_scales, _ = model(
                 images,
                 return_paths=True,
             )
-            if sigma_f.dim() == 1:
+            if length_scales is None:
+                length_scales = torch.full(
+                    (images.size(0), 3),
+                    float('nan'),
+                    device=device,
+                    dtype=strain_paths.dtype,
+                )
+            if sigma_f is None:
+                sigma_f = torch.full_like(length_scales, float('nan'))
+            elif sigma_f.dim() == 1:
                 sigma_f = sigma_f.unsqueeze(0).expand(images.size(0), -1)
 
             images_all.append(images.cpu())
@@ -335,10 +353,15 @@ def plot_prnn_sample_diagnostics(diagnostics, digits, filename):
             ax = axes[row, component + 1]
             ax.plot(time_steps, strain_paths[row, :, component].numpy())
             ax.set_ylim(strain_y_limits[component].tolist())
-            ax.set_xlabel(
-                rf'$\ell$={length_scales[row, component].item():.3g}, '
-                rf'$\sigma_f$={sigma_f[row, component].item():.3g}'
-            )
+            length_scale = length_scales[row, component].item()
+            sigma_f_value = sigma_f[row, component].item()
+            if np.isnan(length_scale) or np.isnan(sigma_f_value):
+                ax.set_xlabel('timesignal pixel strain')
+            else:
+                ax.set_xlabel(
+                    rf'$\ell$={length_scale:.3g}, '
+                    rf'$\sigma_f$={sigma_f_value:.3g}'
+                )
             if row == 0:
                 ax.set_title(strain_names[component])
             if component == 0:
@@ -393,6 +416,7 @@ def main():
         seq_len=args.seq_len,
         n_classes=n_classes,
         decoder_features=args.decoder_features,
+        image_parametrization=args.image_parametrization,
         sigma_f_mode=args.sigma_f_mode,
         device=device,
     ).to(device)
@@ -404,6 +428,7 @@ def main():
 
     print(f'Training on MNIST digits {args.digits} ({n_classes} classes).')
     print(f'PRNN decoder features: {args.decoder_features}')
+    print(f'PRNN image parametrization: {args.image_parametrization}')
     print(f'PRNN sigma_f mode: {args.sigma_f_mode}')
     train_classifier(prnn, train_loader, device, args.epochs, args.lr, 'PRNN')
     train_classifier(mlp, train_loader, device, args.epochs, args.lr, 'MLP')
