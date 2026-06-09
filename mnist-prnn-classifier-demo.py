@@ -273,6 +273,7 @@ def collect_prnn_sample_diagnostics(model, loader, device):
     length_scales_all = []
     sigma_f_all = []
     plastic_strain_history_all = []
+    equivalent_plastic_strain_history_all = []
 
     with torch.no_grad():
         for images, labels in loader:
@@ -287,6 +288,7 @@ def collect_prnn_sample_diagnostics(model, loader, device):
                 length_scales,
                 _,
                 plastic_strain_history,
+                equivalent_plastic_strain_history,
             ) = model(
                 images,
                 return_paths=True,
@@ -311,6 +313,9 @@ def collect_prnn_sample_diagnostics(model, loader, device):
             length_scales_all.append(length_scales.cpu())
             sigma_f_all.append(sigma_f.cpu())
             plastic_strain_history_all.append(plastic_strain_history.cpu())
+            equivalent_plastic_strain_history_all.append(
+                equivalent_plastic_strain_history.cpu()
+            )
 
     return {
         'images': torch.cat(images_all),
@@ -320,6 +325,9 @@ def collect_prnn_sample_diagnostics(model, loader, device):
         'length_scales': torch.cat(length_scales_all),
         'sigma_f': torch.cat(sigma_f_all),
         'plastic_strain_history': torch.cat(plastic_strain_history_all),
+        'equivalent_plastic_strain_history': torch.cat(
+            equivalent_plastic_strain_history_all
+        ),
     }
 
 
@@ -329,18 +337,25 @@ def plot_prnn_sample_diagnostics(diagnostics, digits, filename):
     probabilities = diagnostics['probabilities']
     strain_paths = diagnostics['strain_paths']
     plastic_strain_history = diagnostics['plastic_strain_history']
+    equivalent_plastic_strain_history = diagnostics[
+        'equivalent_plastic_strain_history'
+    ]
     length_scales = diagnostics['length_scales']
     sigma_f = diagnostics['sigma_f']
     n_samples = images.size(0)
     time_steps = np.arange(strain_paths.size(1))
     strain_names = (r'$\epsilon_{xx}$', r'$\epsilon_{yy}$', r'$\gamma_{xy}$')
+    epsp_min = plastic_strain_history.amin(dim=(0, 1, 2))
+    epsp_max = plastic_strain_history.amax(dim=(0, 1, 2))
+    epspeq_min = equivalent_plastic_strain_history.amin(dim=(0, 1, 2))
+    epspeq_max = equivalent_plastic_strain_history.amax(dim=(0, 1, 2))
     strain_min = torch.minimum(
-        strain_paths.amin(dim=(0, 1)),
-        plastic_strain_history.amin(dim=(0, 1, 2)),
+        torch.minimum(strain_paths.amin(dim=(0, 1)), epsp_min),
+        epspeq_min.expand_as(epsp_min),
     )
     strain_max = torch.maximum(
-        strain_paths.amax(dim=(0, 1)),
-        plastic_strain_history.amax(dim=(0, 1, 2)),
+        torch.maximum(strain_paths.amax(dim=(0, 1)), epsp_max),
+        epspeq_max.expand_as(epsp_max),
     )
     strain_padding = 0.05 * (strain_max - strain_min)
     zero_range = strain_padding == 0
@@ -380,11 +395,22 @@ def plot_prnn_sample_diagnostics(diagnostics, digits, filename):
                 color='0.35',
                 linewidth=1.5,
             )
+            color_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
             for point in range(plastic_strain_history.size(2)):
+                point_color = color_cycle[point % len(color_cycle)]
                 ax.plot(
                     time_steps,
                     plastic_strain_history[row, :, point, component].numpy(),
                     alpha=0.35,
+                    color=point_color,
+                    linewidth=0.9,
+                )
+                ax.plot(
+                    time_steps,
+                    equivalent_plastic_strain_history[row, :, point].numpy(),
+                    alpha=0.35,
+                    color=point_color,
+                    linestyle='--',
                     linewidth=0.9,
                 )
             ax.set_ylim(strain_y_limits[component].tolist())

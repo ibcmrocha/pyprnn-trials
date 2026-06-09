@@ -385,6 +385,7 @@ class PRNNClassifier(torch.nn.Module):
         ip_pointsb = batch_size * self.mat_pts
         material_model.configure(ip_pointsb)
         epsp_history = []
+        epspeq_history = []
 
         for t in range(self.seq_len):
             local_strain = self.fc1(strain_paths[:, t, :])
@@ -396,6 +397,12 @@ class PRNNClassifier(torch.nn.Module):
                         batch_size,
                         self.mat_pts,
                         self.n_features,
+                    ).clone()
+                )
+                epspeq_history.append(
+                    material_model.getHistory().view(
+                        batch_size,
+                        self.mat_pts,
                     ).clone()
                 )
 
@@ -413,6 +420,7 @@ class PRNNClassifier(torch.nn.Module):
                     length_scales,
                     decoder_features,
                     torch.stack(epsp_history, dim=1),
+                    torch.stack(epspeq_history, dim=1),
                 )
             return output, strain_paths, length_scales, decoder_features
         return output
