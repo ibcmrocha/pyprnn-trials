@@ -331,6 +331,16 @@ def collect_prnn_sample_diagnostics(model, loader, device):
     }
 
 
+def _padded_limits(min_values, max_values):
+    padding = 0.05 * (max_values - min_values)
+    padding = torch.where(
+        padding == 0,
+        torch.full_like(padding, 1e-12),
+        padding,
+    )
+    return torch.stack((min_values - padding, max_values + padding), dim=-1)
+
+
 def plot_prnn_sample_diagnostics(diagnostics, digits, filename):
     images = diagnostics['images']
     labels = diagnostics['labels']
@@ -347,29 +357,22 @@ def plot_prnn_sample_diagnostics(diagnostics, digits, filename):
     strain_names = (r'$\epsilon_{xx}$', r'$\epsilon_{yy}$', r'$\gamma_{xy}$')
     epsp_min = plastic_strain_history.amin(dim=(0, 1, 2))
     epsp_max = plastic_strain_history.amax(dim=(0, 1, 2))
-    epspeq_min = equivalent_plastic_strain_history.amin(dim=(0, 1, 2))
-    epspeq_max = equivalent_plastic_strain_history.amax(dim=(0, 1, 2))
-    strain_min = torch.minimum(
-        torch.minimum(strain_paths.amin(dim=(0, 1)), epsp_min),
-        epspeq_min.expand_as(epsp_min),
+    epsp_strain_min = torch.minimum(strain_paths.amin(dim=(0, 1)), epsp_min)
+    epsp_strain_max = torch.maximum(strain_paths.amax(dim=(0, 1)), epsp_max)
+    epsp_y_limits = _padded_limits(epsp_strain_min, epsp_strain_max)
+    epspeq_y_limits = _padded_limits(
+        equivalent_plastic_strain_history.amin(dim=(0, 1, 2)),
+        equivalent_plastic_strain_history.amax(dim=(0, 1, 2)),
     )
-    strain_max = torch.maximum(
-        torch.maximum(strain_paths.amax(dim=(0, 1)), epsp_max),
-        epspeq_max.expand_as(epsp_max),
-    )
-    strain_padding = 0.05 * (strain_max - strain_min)
-    zero_range = strain_padding == 0
-    strain_padding[zero_range] = 1e-12
-    strain_y_limits = torch.stack((
-        strain_min - strain_padding,
-        strain_max + strain_padding,
-    ), dim=1)
+    color_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
-    fig, axes = plt.subplots(
+    fig = plt.figure(figsize=(16, max(3.2 * n_samples, 3.5)))
+    grid = fig.add_gridspec(
         n_samples,
         5,
-        figsize=(16, max(2.2 * n_samples, 3.0)),
-        squeeze=False,
+        width_ratios=(1.0, 2.2, 2.2, 2.2, 1.0),
+        hspace=0.55,
+        wspace=0.35,
     )
     for row in range(n_samples):
         image = images[row].squeeze().numpy()
@@ -380,32 +383,39 @@ def plot_prnn_sample_diagnostics(diagnostics, digits, filename):
         predicted_digit = digits[predicted_index]
         is_correct = predicted_index == target_index
 
-        axes[row, 0].imshow(image, cmap='gray')
-        axes[row, 0].set_ylabel(f'Sample {row + 1}')
-        axes[row, 0].set_xticks([])
-        axes[row, 0].set_yticks([])
+        ax_image = fig.add_subplot(grid[row, 0])
+        ax_image.imshow(image, cmap='gray')
+        ax_image.set_ylabel(f'Sample {row + 1}')
+        ax_image.set_xticks([])
+        ax_image.set_yticks([])
         if row == 0:
-            axes[row, 0].set_title('Input image')
+            ax_image.set_title('Input image')
 
         for component in range(3):
-            ax = axes[row, component + 1]
-            ax.plot(
+            subgrid = grid[row, component + 1].subgridspec(
+                2,
+                1,
+                height_ratios=(1.0, 1.0),
+                hspace=0.12,
+            )
+            ax_epsp = fig.add_subplot(subgrid[0])
+            ax_epspeq = fig.add_subplot(subgrid[1], sharex=ax_epsp)
+            ax_epsp.plot(
                 time_steps,
                 strain_paths[row, :, component].numpy(),
                 color='0.35',
                 linewidth=1.5,
             )
-            color_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
             for point in range(plastic_strain_history.size(2)):
                 point_color = color_cycle[point % len(color_cycle)]
-                ax.plot(
+                ax_epsp.plot(
                     time_steps,
                     plastic_strain_history[row, :, point, component].numpy(),
                     alpha=0.35,
                     color=point_color,
                     linewidth=0.9,
                 )
-                ax.plot(
+                ax_epspeq.plot(
                     time_steps,
                     equivalent_plastic_strain_history[row, :, point].numpy(),
                     alpha=0.35,
@@ -413,24 +423,28 @@ def plot_prnn_sample_diagnostics(diagnostics, digits, filename):
                     linestyle='--',
                     linewidth=0.9,
                 )
-            ax.set_ylim(strain_y_limits[component].tolist())
+            ax_epsp.set_ylim(epsp_y_limits[component].tolist())
+            ax_epspeq.set_ylim(epspeq_y_limits.tolist())
+            ax_epsp.tick_params(labelbottom=False)
             length_scale = length_scales[row, component].item()
             sigma_f_value = sigma_f[row, component].item()
             if np.isnan(length_scale) or np.isnan(sigma_f_value):
-                ax.set_xlabel('timesignal pixel strain')
+                ax_epspeq.set_xlabel('timesignal pixel strain')
             else:
-                ax.set_xlabel(
+                ax_epspeq.set_xlabel(
                     rf'$\ell$={length_scale:.3g}, '
                     rf'$\sigma_f$={sigma_f_value:.3g}'
                 )
             if row == 0:
-                ax.set_title(strain_names[component])
+                ax_epsp.set_title(strain_names[component])
             if component == 0:
-                ax.set_ylabel('strain')
+                ax_epsp.set_ylabel('strain / epsp')
+                ax_epspeq.set_ylabel('epspeq')
 
-        axes[row, 4].axis('off')
+        ax_labels = fig.add_subplot(grid[row, 4])
+        ax_labels.axis('off')
         label_color = 'tab:green' if is_correct else 'tab:red'
-        axes[row, 4].text(
+        ax_labels.text(
             0.5,
             0.5,
             f'pred: {predicted_digit}\n'
@@ -440,13 +454,12 @@ def plot_prnn_sample_diagnostics(diagnostics, digits, filename):
             va='center',
             color=label_color,
             fontsize=11,
-            transform=axes[row, 4].transAxes,
+            transform=ax_labels.transAxes,
         )
         if row == 0:
-            axes[row, 4].set_title('PRNN labels')
+            ax_labels.set_title('PRNN labels')
 
-    fig.tight_layout()
-    fig.savefig(filename, dpi=150)
+    fig.savefig(filename, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f'Saved PRNN sample diagnostics to {filename}')
 
