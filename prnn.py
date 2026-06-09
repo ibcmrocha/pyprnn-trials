@@ -301,6 +301,7 @@ class PRNNClassifier(torch.nn.Module):
             column_signal,
             diagonal_signal,
         ), dim=-1)
+        strain_paths += 1e-10*torch.ones_like(strain_paths)
         strain_paths = self._smooth_timesignal_paths(strain_paths)
         return strain_paths.contiguous()
 
