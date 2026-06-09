@@ -134,6 +134,14 @@ class PRNNClassifier(torch.nn.Module):
         self.strain_scale = kwargs.get('strain_scale', 1.0)
         hidden_size = kwargs.get('hidden_size', 64)
         self.image_parametrization = kwargs.get('image_parametrization', 'gp')
+        self.timesignal_smoothing_steps = int(kwargs.get(
+            'timesignal_smoothing_steps',
+            0,
+        ))
+        if self.timesignal_smoothing_steps < 0:
+            raise ValueError(
+                'timesignal_smoothing_steps must be non-negative.'
+            )
         valid_image_parametrizations = ('gp', 'timesignal')
         if self.image_parametrization not in valid_image_parametrizations:
             raise ValueError(
@@ -168,10 +176,15 @@ class PRNNClassifier(torch.nn.Module):
             self.timesignal_seq_len = self.image_shape[-2] * self.image_shape[-1]
         if self.image_parametrization == 'timesignal':
             self.seq_len = self.timesignal_seq_len
+            if self.timesignal_seq_len > 1:
+                self.seq_len += (
+                    self.timesignal_seq_len - 1
+                ) * self.timesignal_smoothing_steps
 
         print('--- PRNNClassifier model summary ---')
         print('Input (image) size', self.image_shape)
         print('Image parametrization', self.image_parametrization)
+        print('Timesignal smoothing steps', self.timesignal_smoothing_steps)
         print('Strain path length', self.seq_len)
         print('Material layer size (points)', self.mat_pts)
         print('Material layer size (units)', self.n_latents)
@@ -288,7 +301,26 @@ class PRNNClassifier(torch.nn.Module):
             column_signal,
             diagonal_signal,
         ), dim=-1)
+        strain_paths = self._smooth_timesignal_paths(strain_paths)
         return strain_paths.contiguous()
+
+    def _smooth_timesignal_paths(self, strain_paths):
+        if self.timesignal_smoothing_steps == 0 or strain_paths.size(1) <= 1:
+            return strain_paths
+
+        smoothed_steps = []
+        for i in range(strain_paths.size(1) - 1):
+            current_step = strain_paths[:, i, :]
+            next_step = strain_paths[:, i + 1, :]
+            smoothed_steps.append(current_step.unsqueeze(1))
+            for step in range(1, self.timesignal_smoothing_steps + 1):
+                alpha = step / (self.timesignal_smoothing_steps + 1)
+                interpolated_step = (
+                    (1.0 - alpha) * current_step + alpha * next_step
+                )
+                smoothed_steps.append(interpolated_step.unsqueeze(1))
+        smoothed_steps.append(strain_paths[:, -1:, :])
+        return torch.cat(smoothed_steps, dim=1)
 
     def _diagonal_vectorize(self, image_matrix):
         height = image_matrix.size(1)

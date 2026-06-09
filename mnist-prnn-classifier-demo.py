@@ -95,6 +95,12 @@ def parse_args():
         help='map images to GP-sampled or direct rasterized strain paths',
     )
     parser.add_argument(
+        '--timesignal-smoothing-steps',
+        type=int,
+        default=0,
+        help='linearly interpolated steps inserted between timesignal pixels',
+    )
+    parser.add_argument(
         '--mat-pts',
         type=int,
         default=6,
@@ -417,6 +423,7 @@ def main():
         n_classes=n_classes,
         decoder_features=args.decoder_features,
         image_parametrization=args.image_parametrization,
+        timesignal_smoothing_steps=args.timesignal_smoothing_steps,
         sigma_f_mode=args.sigma_f_mode,
         device=device,
     ).to(device)
@@ -429,6 +436,7 @@ def main():
     print(f'Training on MNIST digits {args.digits} ({n_classes} classes).')
     print(f'PRNN decoder features: {args.decoder_features}')
     print(f'PRNN image parametrization: {args.image_parametrization}')
+    print(f'Timesignal smoothing steps: {args.timesignal_smoothing_steps}')
     print(f'PRNN sigma_f mode: {args.sigma_f_mode}')
     train_classifier(prnn, train_loader, device, args.epochs, args.lr, 'PRNN')
     train_classifier(mlp, train_loader, device, args.epochs, args.lr, 'MLP')
