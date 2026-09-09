@@ -143,14 +143,14 @@ def parse_args():
         help='row-per-test-sample PRNN diagnostic figure output path',
     )
     parser.add_argument(
-        '--loss-figure',
-        default='mnist-prnn-test-loss.png',
-        help='test-loss curve output path',
+        '--accuracy-figure',
+        default='mnist-prnn-test-accuracy.png',
+        help='test-accuracy curve output path',
     )
     parser.add_argument(
-        '--loss-file',
-        default='mnist-prnn-test-loss.txt',
-        help='tab-separated per-epoch test losses',
+        '--accuracy-file',
+        default='mnist-prnn-test-accuracy.txt',
+        help='tab-separated per-epoch test accuracies in percent',
     )
     return parser.parse_args()
 
@@ -201,10 +201,9 @@ def _select_digits(dataset, digits, size, dtype):
     return torch.stack(images), torch.tensor(labels, dtype=torch.long)
 
 
-def evaluate_loss(model, loader, device, mc_samples=1):
-    criterion = torch.nn.CrossEntropyLoss()
+def evaluate_accuracy(model, loader, device, mc_samples=1):
     model.eval()
-    total_loss = 0.0
+    correct = 0
     total_samples = 0
     with torch.no_grad():
         for images, labels in loader:
@@ -217,9 +216,9 @@ def evaluate_loss(model, loader, device, mc_samples=1):
                     model(images, return_logits=True)
                     for _ in range(mc_samples)
                 ]).mean(dim=0)
-            total_loss += criterion(logits, labels).item() * images.size(0)
+            correct += (logits.argmax(dim=-1) == labels).sum().item()
             total_samples += images.size(0)
-    return total_loss / total_samples
+    return 100.0 * correct / total_samples
 
 
 def train_classifier(
@@ -227,7 +226,7 @@ def train_classifier(
 ):
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    test_losses = []
+    test_accuracies = []
     for epoch in range(epochs):
         model.train()
         running_loss = 0.0
@@ -241,36 +240,50 @@ def train_classifier(
             optimizer.step()
             running_loss += loss.item()
         print(f'{name} epoch {epoch + 1:03d}: loss={running_loss / len(loader):.4f}')
-        test_loss = evaluate_loss(model, test_loader, device, mc_samples)
-        test_losses.append(test_loss)
-        print(f'{name} epoch {epoch + 1:03d}: test_loss={test_loss:.4f}')
-    return test_losses
+        test_accuracy = evaluate_accuracy(model, test_loader, device, mc_samples)
+        test_accuracies.append(test_accuracy)
+        print(
+            f'{name} epoch {epoch + 1:03d}: '
+            f'test_accuracy={test_accuracy:.2f}%'
+        )
+    return test_accuracies
 
 
-def save_test_losses(losses, text_filename, figure_filename):
-    names = tuple(losses)
-    epochs = range(1, len(next(iter(losses.values()))) + 1)
+def save_test_accuracies(accuracies, text_filename, figure_filename):
+    names = tuple(accuracies)
+    epochs = range(1, len(next(iter(accuracies.values()))) + 1)
     with open(text_filename, 'w', encoding='utf-8') as output:
         output.write('epoch\t' + '\t'.join(names) + '\n')
         for epoch_index, epoch in enumerate(epochs):
-            values = (losses[name][epoch_index] for name in names)
+            values = (accuracies[name][epoch_index] for name in names)
             output.write(
                 str(epoch) + '\t' + '\t'.join(f'{value:.10g}' for value in values) + '\n'
             )
 
-    dark2 = ('#1b9e77', '#d95f02', '#7570b3')
+    dark2 = ('#1b9e77', '#d95f02')
     fig, ax = plt.subplots(figsize=(7.2, 4.6))
-    for color, name in zip(dark2, names):
-        ax.plot(epochs, losses[name], color=color, linewidth=2.2, label=name)
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('Test cross-entropy loss')
+    prnn_labels = {
+        'Linear PRNN': 'Linear material blocks',
+        'Plastic PRNN': 'Non-linear material blocks',
+    }
+    for color, name in zip(dark2, prnn_labels):
+        ax.plot(
+            epochs,
+            accuracies[name],
+            color=color,
+            linewidth=2.5,
+            label=prnn_labels[name],
+        )
+    ax.set_xlabel('Epoch', fontsize=13)
+    ax.set_ylabel('Test accuracy (%)', fontsize=13)
     ax.set_xticks(list(epochs))
+    ax.tick_params(axis='both', labelsize=11)
     ax.grid(alpha=0.22)
-    ax.legend(frameon=False)
+    ax.legend(frameon=False, fontsize=12)
     fig.tight_layout()
     fig.savefig(figure_filename, dpi=180)
     plt.close(fig)
-    print(f'Saved test losses to {text_filename} and {figure_filename}')
+    print(f'Saved test accuracies to {text_filename} and {figure_filename}')
 
 
 def predict_probabilities(model, loader, device, mc_samples=1):
@@ -586,19 +599,23 @@ def main():
     print(f'Timesignal smoothing steps: {args.timesignal_smoothing_steps}')
     print(f'PRNN sigma_f mode: {args.sigma_f_mode}')
     print(f'Hidden/material units per model: {3 * args.mat_pts}')
-    losses = {}
-    losses['Linear PRNN'] = train_classifier(
+    accuracies = {}
+    accuracies['Linear PRNN'] = train_classifier(
         linear_prnn, train_loader, test_loader, device, args.epochs, args.lr,
         'Linear PRNN', args.mc_samples,
     )
-    losses['Plastic PRNN'] = train_classifier(
+    accuracies['Plastic PRNN'] = train_classifier(
         plastic_prnn, train_loader, test_loader, device, args.epochs, args.lr,
         'Plastic PRNN', args.mc_samples,
     )
-    losses['MLP'] = train_classifier(
+    accuracies['MLP'] = train_classifier(
         mlp, train_loader, test_loader, device, args.epochs, args.lr, 'MLP', 1,
     )
-    save_test_losses(losses, args.loss_file, args.loss_figure)
+    save_test_accuracies(
+        accuracies,
+        args.accuracy_file,
+        args.accuracy_figure,
+    )
 
     linear_probabilities, targets = predict_probabilities(
         linear_prnn,
