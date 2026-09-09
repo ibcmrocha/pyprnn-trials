@@ -2,9 +2,14 @@
 # -*- coding: utf-8 -*-
 """MNIST trial for a stochastic multi-class PRNN classifier.
 
-The script trains two models on the same configurable MNIST digit subset:
+The script trains three models on the same configurable MNIST digit subset:
 
-* ``PRNNClassifier``: encodes each image to GP length scales, samples a strain
+* A linear-elastic ``PRNNClassifier`` followed by a J2 plastic PRNN. Each
+  encodes an image to a strain path and decodes the final material-point
+  stresses.
+* The plastic ``PRNNClassifier`` can instead decode internal variables when
+  requested.
+* ``PRNNClassifier`` in GP mode encodes each image to GP length scales, samples a strain
   path on every forward pass, runs the path through the J2 material layer, and
   decodes the selected material state features to class logits.
 * ``MLPClassifier``: a direct fully-connected image classifier used as a simple
@@ -114,9 +119,9 @@ def parse_args():
     )
     parser.add_argument(
         '--decoder-features',
-        choices=('epspeq', 'epsp', 'both'),
-        default='epspeq',
-        help='material state features decoded by the PRNN classifier',
+        choices=('epspeq', 'epsp', 'both', 'stress'),
+        default='stress',
+        help='features decoded by the plastic PRNN (linear always uses stress)',
     )
     parser.add_argument(
         '--sigma-f-mode',
@@ -136,6 +141,16 @@ def parse_args():
         '--sample-figure',
         default='mnist-prnn-test-samples.png',
         help='row-per-test-sample PRNN diagnostic figure output path',
+    )
+    parser.add_argument(
+        '--loss-figure',
+        default='mnist-prnn-test-loss.png',
+        help='test-loss curve output path',
+    )
+    parser.add_argument(
+        '--loss-file',
+        default='mnist-prnn-test-loss.txt',
+        help='tab-separated per-epoch test losses',
     )
     return parser.parse_args()
 
@@ -186,11 +201,35 @@ def _select_digits(dataset, digits, size, dtype):
     return torch.stack(images), torch.tensor(labels, dtype=torch.long)
 
 
-def train_classifier(model, loader, device, epochs, lr, name):
+def evaluate_loss(model, loader, device, mc_samples=1):
+    criterion = torch.nn.CrossEntropyLoss()
+    model.eval()
+    total_loss = 0.0
+    total_samples = 0
+    with torch.no_grad():
+        for images, labels in loader:
+            images = images.to(device)
+            labels = labels.to(device)
+            if mc_samples == 1:
+                logits = model(images, return_logits=True)
+            else:
+                logits = torch.stack([
+                    model(images, return_logits=True)
+                    for _ in range(mc_samples)
+                ]).mean(dim=0)
+            total_loss += criterion(logits, labels).item() * images.size(0)
+            total_samples += images.size(0)
+    return total_loss / total_samples
+
+
+def train_classifier(
+    model, loader, test_loader, device, epochs, lr, name, mc_samples=1,
+):
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    model.train()
+    test_losses = []
     for epoch in range(epochs):
+        model.train()
         running_loss = 0.0
         for images, labels in loader:
             images = images.to(device)
@@ -202,6 +241,36 @@ def train_classifier(model, loader, device, epochs, lr, name):
             optimizer.step()
             running_loss += loss.item()
         print(f'{name} epoch {epoch + 1:03d}: loss={running_loss / len(loader):.4f}')
+        test_loss = evaluate_loss(model, test_loader, device, mc_samples)
+        test_losses.append(test_loss)
+        print(f'{name} epoch {epoch + 1:03d}: test_loss={test_loss:.4f}')
+    return test_losses
+
+
+def save_test_losses(losses, text_filename, figure_filename):
+    names = tuple(losses)
+    epochs = range(1, len(next(iter(losses.values()))) + 1)
+    with open(text_filename, 'w', encoding='utf-8') as output:
+        output.write('epoch\t' + '\t'.join(names) + '\n')
+        for epoch_index, epoch in enumerate(epochs):
+            values = (losses[name][epoch_index] for name in names)
+            output.write(
+                str(epoch) + '\t' + '\t'.join(f'{value:.10g}' for value in values) + '\n'
+            )
+
+    dark2 = ('#1b9e77', '#d95f02', '#7570b3')
+    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    for color, name in zip(dark2, names):
+        ax.plot(epochs, losses[name], color=color, linewidth=2.2, label=name)
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Test cross-entropy loss')
+    ax.set_xticks(list(epochs))
+    ax.grid(alpha=0.22)
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    fig.savefig(figure_filename, dpi=180)
+    plt.close(fig)
+    print(f'Saved test losses to {text_filename} and {figure_filename}')
 
 
 def predict_probabilities(model, loader, device, mc_samples=1):
@@ -484,20 +553,30 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
     image_shape = train_dataset.tensors[0].shape[1:]
 
-    prnn = PRNNClassifier(
+    common_prnn = dict(
         image_shape=image_shape,
         n_matpts=args.mat_pts,
         seq_len=args.seq_len,
         n_classes=n_classes,
-        decoder_features=args.decoder_features,
         image_parametrization=args.image_parametrization,
         timesignal_smoothing_steps=args.timesignal_smoothing_steps,
         sigma_f_mode=args.sigma_f_mode,
         device=device,
+    )
+    linear_prnn = PRNNClassifier(
+        **common_prnn,
+        material_type='linear',
+        decoder_features='stress',
+    ).to(device)
+    plastic_prnn = PRNNClassifier(
+        **common_prnn,
+        material_type='j2',
+        decoder_features=args.decoder_features,
     ).to(device)
     mlp = MLPClassifier(
         image_shape=image_shape,
         n_classes=n_classes,
+        hidden_sizes=(3 * args.mat_pts,),
         device=device,
     ).to(device)
 
@@ -506,28 +585,51 @@ def main():
     print(f'PRNN image parametrization: {args.image_parametrization}')
     print(f'Timesignal smoothing steps: {args.timesignal_smoothing_steps}')
     print(f'PRNN sigma_f mode: {args.sigma_f_mode}')
-    train_classifier(prnn, train_loader, device, args.epochs, args.lr, 'PRNN')
-    train_classifier(mlp, train_loader, device, args.epochs, args.lr, 'MLP')
+    print(f'Hidden/material units per model: {3 * args.mat_pts}')
+    losses = {}
+    losses['Linear PRNN'] = train_classifier(
+        linear_prnn, train_loader, test_loader, device, args.epochs, args.lr,
+        'Linear PRNN', args.mc_samples,
+    )
+    losses['Plastic PRNN'] = train_classifier(
+        plastic_prnn, train_loader, test_loader, device, args.epochs, args.lr,
+        'Plastic PRNN', args.mc_samples,
+    )
+    losses['MLP'] = train_classifier(
+        mlp, train_loader, test_loader, device, args.epochs, args.lr, 'MLP', 1,
+    )
+    save_test_losses(losses, args.loss_file, args.loss_figure)
 
-    prnn_probabilities, targets = predict_probabilities(
-        prnn,
+    linear_probabilities, targets = predict_probabilities(
+        linear_prnn,
         test_loader,
         device,
         args.mc_samples,
     )
+    plastic_probabilities, _ = predict_probabilities(
+        plastic_prnn, test_loader, device, args.mc_samples,
+    )
     mlp_probabilities, _ = predict_probabilities(mlp, test_loader, device, 1)
-    prnn_matrix = confusion_matrix(prnn_probabilities, targets, n_classes)
+    linear_matrix = confusion_matrix(linear_probabilities, targets, n_classes)
+    plastic_matrix = confusion_matrix(plastic_probabilities, targets, n_classes)
     mlp_matrix = confusion_matrix(mlp_probabilities, targets, n_classes)
 
-    print('PRNN confusion matrix:\n', prnn_matrix.numpy())
+    print('Linear PRNN confusion matrix:\n', linear_matrix.numpy())
+    print('Plastic PRNN confusion matrix:\n', plastic_matrix.numpy())
     print('MLP confusion matrix:\n', mlp_matrix.numpy())
     plot_confusion_matrices(
-        [prnn_matrix, mlp_matrix],
-        [f'PRNN ({args.mc_samples} MC samples)', 'MLP baseline'],
+        [linear_matrix, plastic_matrix, mlp_matrix],
+        [
+            f'Linear PRNN ({args.mc_samples} MC)',
+            f'Plastic PRNN ({args.mc_samples} MC)',
+            'MLP baseline',
+        ],
         args.digits,
         args.figure,
     )
-    diagnostics = collect_prnn_sample_diagnostics(prnn, test_loader, device)
+    diagnostics = collect_prnn_sample_diagnostics(
+        plastic_prnn, test_loader, device,
+    )
     plot_prnn_sample_diagnostics(diagnostics, args.digits, args.sample_figure)
 
 

@@ -38,6 +38,7 @@ import math
 import torch
 
 from J2Tensor_vect import J2Material
+from LinearElasticTensor_vect import LinearElasticMaterial
 
 
 class PRNN(torch.nn.Module):
@@ -157,11 +158,23 @@ class PRNNClassifier(torch.nn.Module):
                 f'{valid_sigma_f_modes}, got {self.sigma_f_mode!r}.'
             )
         self.decoder_features = kwargs.get('decoder_features', 'epspeq')
-        valid_decoder_features = ('epspeq', 'epsp', 'both')
+        valid_decoder_features = ('epspeq', 'epsp', 'both', 'stress')
         if self.decoder_features not in valid_decoder_features:
             raise ValueError(
                 'decoder_features must be one of '
                 f'{valid_decoder_features}, got {self.decoder_features!r}.'
+            )
+        self.material_type = kwargs.get('material_type', 'j2')
+        valid_material_types = ('j2', 'linear')
+        if self.material_type not in valid_material_types:
+            raise ValueError(
+                f'material_type must be one of {valid_material_types}, '
+                f'got {self.material_type!r}.'
+            )
+        if self.material_type == 'linear' and self.decoder_features != 'stress':
+            raise ValueError(
+                "Linear-elastic PRNNs require decoder_features='stress' "
+                'because they have no plastic internal variables.'
             )
 
         if self.n_outputs < 2:
@@ -189,6 +202,7 @@ class PRNNClassifier(torch.nn.Module):
         print('Material layer size (points)', self.mat_pts)
         print('Material layer size (units)', self.n_latents)
         print('Decoder features', self.decoder_features)
+        print('Material model', self.material_type)
         print('GP sigma_f mode', self.sigma_f_mode)
         print('Output classes', self.n_outputs)
         print('------------------------------------')
@@ -214,6 +228,7 @@ class PRNNClassifier(torch.nn.Module):
             'epspeq': self.mat_pts,
             'epsp': self.n_latents,
             'both': self.mat_pts + self.n_latents,
+            'stress': self.n_latents,
         }
         decoder_input_size = decoder_input_sizes[self.decoder_features]
         self.decoder = torch.nn.Linear(
@@ -381,17 +396,20 @@ class PRNNClassifier(torch.nn.Module):
         strain_paths, length_scales, _ = self.encode_strain_paths(images)
         batch_size = strain_paths.size(0)
 
-        material_model = J2Material(self.device)
+        material_model = self._make_material_model()
         ip_pointsb = batch_size * self.mat_pts
         material_model.configure(ip_pointsb)
         epsp_history = []
         epspeq_history = []
+        stress = None
 
         for t in range(self.seq_len):
             local_strain = self.fc1(strain_paths[:, t, :])
-            material_model.update(local_strain.view(ip_pointsb, self.n_features))
+            stress = material_model.update(
+                local_strain.view(ip_pointsb, self.n_features)
+            )
             material_model.commit()
-            if return_history:
+            if return_history and self.material_type == 'j2':
                 epsp_history.append(
                     material_model.epsp_hist.view(
                         batch_size,
@@ -406,14 +424,18 @@ class PRNNClassifier(torch.nn.Module):
                     ).clone()
                 )
 
-        decoder_features = self._get_decoder_features(material_model, batch_size)
+        decoder_features = self._get_decoder_features(
+            material_model,
+            stress,
+            batch_size,
+        )
         logits = self.decoder(decoder_features)
         output = logits
         if not return_logits:
             output = torch.softmax(logits, dim=-1)
 
         if return_paths:
-            if return_history:
+            if return_history and self.material_type == 'j2':
                 return (
                     output,
                     strain_paths,
@@ -425,7 +447,14 @@ class PRNNClassifier(torch.nn.Module):
             return output, strain_paths, length_scales, decoder_features
         return output
 
-    def _get_decoder_features(self, material_model, batch_size):
+    def _make_material_model(self):
+        if self.material_type == 'linear':
+            return LinearElasticMaterial(self.device)
+        return J2Material(self.device)
+
+    def _get_decoder_features(self, material_model, stress, batch_size):
+        if self.decoder_features == 'stress':
+            return stress.view(batch_size, self.n_latents)
         epspeq = material_model.getHistory().view(batch_size, self.mat_pts)
         epsp = material_model.epsp_hist.view(batch_size, self.n_latents)
         if self.decoder_features == 'epspeq':
