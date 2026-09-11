@@ -31,6 +31,7 @@ import argparse
 import random
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
@@ -261,7 +262,8 @@ def save_test_accuracies(accuracies, text_filename, figure_filename):
             )
 
     dark2 = ('#1b9e77', '#d95f02')
-    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    fig, ax = plt.subplots(figsize=(7.2, 4.6), facecolor='white')
+    ax.set_facecolor('white')
     prnn_labels = {
         'Linear PRNN': 'Linear material blocks',
         'Plastic PRNN': 'Non-linear material blocks',
@@ -276,9 +278,14 @@ def save_test_accuracies(accuracies, text_filename, figure_filename):
         )
     ax.set_xlabel('Epoch', fontsize=13)
     ax.set_ylabel('Test accuracy (%)', fontsize=13)
-    ax.set_xticks(list(epochs))
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=8, integer=True, min_n_ticks=3))
+    if len(epochs) > 1:
+        ax.set_xlim(1, len(epochs))
+    else:
+        ax.set_xlim(0.5, 1.5)
     ax.tick_params(axis='both', labelsize=11)
-    ax.grid(alpha=0.22)
+    ax.minorticks_off()
+    ax.grid(axis='y', which='major', color='0.85', linewidth=0.8)
     ax.legend(frameon=False, fontsize=12)
     fig.tight_layout()
     fig.savefig(figure_filename, dpi=180)
